@@ -1,76 +1,95 @@
 package main
 
 import (
-	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"sync"
 
-	"github.com/gorilla/mux"
+	"github.com/ant0ine/go-json-rest/rest"
+	ldap "gopkg.in/ldap.v2"
 )
 
-var people []Person
-
 func main() {
-	router := mux.NewRouter()
+	api := rest.NewApi()
+	api.Use(rest.DefaultDevStack...)
 
-	people = append(people, Person{ID: "1", Firstname: "John", Lastname: "Doe", Address: &Address{City: "City X", State: "State X"}})
-	people = append(people, Person{ID: "2", Firstname: "Koko", Lastname: "Doe", Address: &Address{City: "City Z", State: "State Y"}})
-	people = append(people, Person{ID: "3", Firstname: "Francis", Lastname: "Sunday"})
+	api.Use(&rest.CorsMiddleware{
+		RejectNonCorsRequests: false,
+		OriginValidator: func(origin string, request *rest.Request) bool {
+			return origin == "http://localhost:3001"
+		},
+		AllowedMethods: []string{"GET", "POST", "PUT"},
+		AllowedHeaders: []string{
+			"Accept", "Content-Type", "X-Custom-Header", "Origin"},
+		AccessControlAllowCredentials: true,
+		AccessControlMaxAge:           3600,
+	})
 
-	router.HandleFunc("/people", GetPeople).Methods("GET")
-	router.HandleFunc("/people/{id}", GetPerson).Methods("GET")
-	router.HandleFunc("/people/{id}", CreatePerson).Methods("POST")
-	router.HandleFunc("/people/{id}", DeletePerson).Methods("DELETE")
-	log.Fatal(http.ListenAndServe(":8080", router))
-}
-
-// GetPeople : Return Person list
-func GetPeople(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(people)
-}
-
-// GetPerson : Return a Person by id
-func GetPerson(w http.ResponseWriter, r *http.Request) {
-	params := mux.Vars(r)
-	for _, item := range people {
-		if item.ID == params["id"] {
-			json.NewEncoder(w).Encode(item)
-		}
+	router, err := rest.MakeRouter(
+		rest.Get("/users", GetAllLdapUsers),
+	)
+	if err != nil {
+		log.Fatal(err)
 	}
+	api.SetApp(router)
+	log.Fatal(http.ListenAndServe(":8080", api.MakeHandler()))
 }
 
-// CreatePerson : Create Person by posted id
-func CreatePerson(w http.ResponseWriter, r *http.Request) {
-	params := mux.Vars(r)
-	var person Person
-	_ = json.NewDecoder(r.Body).Decode(&person)
-	person.ID = params["id"]
-	people = append(people, person)
-	json.NewEncoder(w).Encode(people)
+type Graph struct {
+	Nodes []*Node
+	Links []*Link
 }
 
-// DeletePerson :  Delete a Person by id
-func DeletePerson(w http.ResponseWriter, r *http.Request) {
-	params := mux.Vars(r)
-	for index, item := range people {
-		if item.ID == params["id"] {
-			people = append(people[:index], people[index+1:]...)
-			break
-		}
-		json.NewEncoder(w).Encode(people)
+type Node struct {
+	id    string
+	group int
+}
+
+type Link struct {
+	Source string
+	Target string
+}
+
+var lock = sync.RWMutex{}
+
+// GetAllLdapUsers : get users in ldap
+func GetAllLdapUsers(w rest.ResponseWriter, r *rest.Request) {
+	lock.RLock()
+	userEntries := LdapUsersSearch()
+	//group Entries
+
+	// convert Entries to graph model json
+	//graphJSON := jsonConverter(userEntries)
+	lock.RUnlock()
+	w.WriteJson(&userEntries)
+}
+
+// LdapUsersSearch : return Entries of LDAP users
+func LdapUsersSearch() []*ldap.Entry {
+	l, err := ldap.Dial("tcp", fmt.Sprintf("%s:%d", "localhost", 389))
+	if err != nil {
+		log.Fatal(err)
 	}
-}
+	defer l.Close()
 
-// Person object
-type Person struct {
-	ID        string   `json:"id,omitempty"`
-	Firstname string   `json:"firstname,omitempty"`
-	Lastname  string   `json:"lastname,omitempty"`
-	Address   *Address `json:"address,omitempty"`
-}
+	err = l.Bind("cn=admin,dc=example,dc=org", "admin")
+	if err != nil {
+		log.Fatal(err)
+	}
 
-// Address object : not has a id
-type Address struct {
-	City  string `json:"city,omitempty"`
-	State string `json:"state,omitempty"`
+	searchRequest := ldap.NewSearchRequest(
+		"dc=example,dc=org", // The base dn to search
+		ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
+		"(&(objectClass=inetOrgPerson))",    // The filter to apply
+		[]string{"dn", "cn", "displayName"}, // A list attributes to retrieve
+		nil,
+	)
+
+	sr, err := l.Search(searchRequest)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return sr.Entries
 }
