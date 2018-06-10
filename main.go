@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 
 	"gopkg.in/resty.v1"
@@ -86,7 +87,10 @@ func GetGraphBelong(w rest.ResponseWriter, r *rest.Request) {
 		log.Fatal(err)
 	}
 
+	nodeList := make([]Node, 0)
+	edgeList := make([]Edge, 0)
 	playerList := make([]Players, 0)
+	playerMap := map[int]string{}
 	for _, row := range seasonTeam.TeamAllSeason.QueryResults.Row {
 		var players Players
 		resp := mlbResponceCreator(
@@ -95,11 +99,45 @@ func GetGraphBelong(w rest.ResponseWriter, r *rest.Request) {
 			log.Fatal(err)
 		}
 		playerList = append(playerList, players)
+
+		// generate team node
+		team_id, _ := strconv.Atoi(row.TeamID)
+		leage_id, _ := strconv.Atoi(row.LeagueID)
+		team_node := Node{
+			ID:    team_id,
+			Label: row.Name,
+			Group: leage_id,
+		}
+		nodeList = append(nodeList, team_node)
+
+		// generate team and player edges and player node
+		for _, row := range players.RosterTeamAlltime.QueryResults.Row {
+			player_id, _ := strconv.Atoi(row.PlayerID)
+			if _, ok := playerMap[player_id]; !ok {
+				playerMap[player_id] = "exist"
+				player_node := Node{
+					ID:    player_id,
+					Label: row.NameLastFirst,
+					Group: team_id,
+				}
+				nodeList = append(nodeList, player_node)
+			}
+			edge := Edge{
+				From: team_id,
+				To:   player_id,
+			}
+			edgeList = append(edgeList, edge)
+		}
+
+	}
+	graph := Graph{
+		Nodes: nodeList,
+		Edges: edgeList,
 	}
 
 	lock.RUnlock()
 
-	w.WriteJson(playerList)
+	w.WriteJson(graph)
 }
 
 func mlbResponceCreator(url string) []byte {
